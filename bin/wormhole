@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# Run the containerized wormhole CLI against the current directory.
+set -eu
+
+IMAGE="${WORMHOLE_IMAGE:-ghcr.io/nuvious/magic-wormhole:latest}"
+
+# Allocate a TTY only when there is one, so the wrapper stays usable in scripts.
+TTY_FLAGS="-i"
+if [ -t 0 ] && [ -t 1 ]; then
+    TTY_FLAGS="-it"
+fi
+
+exec docker run --rm ${TTY_FLAGS} \
+    --user "$(id -u):$(id -g)" \
+    --volume "$(pwd):/data" \
+    --workdir /data \
+    "${IMAGE}" "$@"

@@ -1,0 +1,9 @@
+services:
+  wormhole:
+    image: ghcr.io/nuvious/magic-wormhole:${WORMHOLE_TAG:-latest}
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /data
+    volumes:
+      - ./:/data
+    stdin_open: true
+    tty: true

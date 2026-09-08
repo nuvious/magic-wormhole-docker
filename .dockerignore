@@ -1,0 +1,11 @@
+.git
+.github
+.gitignore
+.gitmodules
+bin
+scripts
+docker-compose.yml
+README.md
+LICENSE
+**/.git
+**/__pycache__

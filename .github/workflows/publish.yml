@@ -1,0 +1,162 @@
+name: publish
+
+on:
+  schedule:
+    # Poll upstream every six hours; upstream publishes tags but no GitHub Releases,
+    # so there is no cross-repository event to subscribe to.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream version to build (default: latest upstream tag)"
+        required: false
+        default: ""
+      force:
+        description: "Rebuild and bump the revision even if the version is already published"
+        type: boolean
+        default: false
+      strict_version_check:
+        description: "Require NEWS.md in the submodule to document the version being built"
+        type: boolean
+        default: true
+  push:
+    # The submodule pin is deliberately absent here; publish commits that pin itself.
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "scripts/**"
+      - ".github/workflows/publish.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      revision: ${{ steps.resolve.outputs.revision }}
+      tags: ${{ steps.resolve.outputs.tags }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image reference
+        id: image
+        run: echo "image=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/magic-wormhole" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve upstream version and revision
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/resolve-version.py \
+            --image "${{ steps.image.outputs.image }}" \
+            --version "${{ github.event.inputs.version }}" \
+            ${{ (github.event.inputs.force == 'true' || github.event_name == 'push') && '--force' || '' }}
+
+      - name: Summarize
+        run: echo "${{ steps.resolve.outputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Point the submodule at the release being built
+        id: submodule
+        run: |
+          scripts/sync-submodule.sh "${{ needs.resolve.outputs.version }}" > /dev/null
+          echo "ref=$(git -C upstream/magic-wormhole rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Record build timestamp
+        id: meta
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build amd64 image for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: magic-wormhole:verify
+          build-args: |
+            WORMHOLE_VERSION=${{ needs.resolve.outputs.version }}
+            STRICT_VERSION_CHECK=${{ github.event.inputs.strict_version_check == 'false' && '0' || '1' }}
+            REVISION=${{ needs.resolve.outputs.revision }}
+            VCS_REF=${{ github.sha }}
+            UPSTREAM_REF=${{ steps.submodule.outputs.ref }}
+            BUILD_DATE=${{ steps.meta.outputs.created }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the entrypoint reports the expected version
+        run: |
+          reported="$(docker run --rm magic-wormhole:verify --version 2>&1 | tr -d '\r')"
+          echo "$reported"
+          echo "$reported" | grep -qF "${{ needs.resolve.outputs.version }}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ needs.resolve.outputs.tags }}
+          build-args: |
+            WORMHOLE_VERSION=${{ needs.resolve.outputs.version }}
+            STRICT_VERSION_CHECK=${{ github.event.inputs.strict_version_check == 'false' && '0' || '1' }}
+            REVISION=${{ needs.resolve.outputs.revision }}
+            VCS_REF=${{ github.sha }}
+            UPSTREAM_REF=${{ steps.submodule.outputs.ref }}
+            BUILD_DATE=${{ steps.meta.outputs.created }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Record the submodule pin that shipped
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add upstream/magic-wormhole
+          if git diff --cached --quiet; then
+            echo "submodule already pinned at ${{ needs.resolve.outputs.version }}"
+            exit 0
+          fi
+          git commit -m "Pin upstream submodule to ${{ needs.resolve.outputs.version }}"
+          git push origin HEAD:main
+
+      - name: Summarize
+        run: |
+          {
+            echo "Published magic-wormhole ${{ needs.resolve.outputs.version }} revision ${{ needs.resolve.outputs.revision }}"
+            echo ""
+            echo "Built from upstream commit ${{ steps.submodule.outputs.ref }}"
+            echo ""
+            echo '```'
+            echo "${{ needs.resolve.outputs.tags }}" | tr ',' '\n'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

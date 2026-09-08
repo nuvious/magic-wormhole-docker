@@ -1,0 +1,3 @@
+[submodule "upstream/magic-wormhole"]
+	path = upstream/magic-wormhole
+	url = https://github.com/magic-wormhole/magic-wormhole.git

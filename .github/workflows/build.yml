@@ -1,0 +1,68 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      # A pull request builds the release this repository pins, not whatever upstream
+      # tagged most recently, so the submodule has to be sitting on a tag.
+      - name: Read the pinned upstream release
+        id: submodule
+        run: |
+          echo "version=$(scripts/sync-submodule.sh)" >> "$GITHUB_OUTPUT"
+          echo "ref=$(git -C upstream/magic-wormhole rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Build amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: magic-wormhole:ci
+          build-args: |
+            WORMHOLE_VERSION=${{ steps.submodule.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            UPSTREAM_REF=${{ steps.submodule.outputs.ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify the entrypoint reports the pinned version
+        run: |
+          reported="$(docker run --rm magic-wormhole:ci --version 2>&1 | tr -d '\r')"
+          echo "$reported"
+          echo "$reported" | grep -qF "${{ steps.submodule.outputs.version }}"
+
+      - name: Verify the image runs under an arbitrary UID with a bind mount
+        run: |
+          mkdir -p "${RUNNER_TEMP}/data"
+          docker run --rm --user 4242:4242 -v "${RUNNER_TEMP}/data:/data" magic-wormhole:ci \
+            send --help > /dev/null
+
+      - name: Build arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          build-args: |
+            WORMHOLE_VERSION=${{ steps.submodule.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            UPSTREAM_REF=${{ steps.submodule.outputs.ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
