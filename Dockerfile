@@ -61,7 +61,7 @@ ARG UPSTREAM_REF=unknown
 ARG BUILD_DATE
 
 LABEL org.opencontainers.image.title="magic-wormhole" \
-      org.opencontainers.image.description="The magic-wormhole CLI, built from upstream source, packaged for one-shot docker run invocations." \
+      org.opencontainers.image.description="The magic-wormhole CLI, built from upstream source, packaged for one-shot docker run invocations, with tmux, screen and trickle alongside it." \
       org.opencontainers.image.version="${WORMHOLE_VERSION}-r${REVISION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
@@ -72,19 +72,30 @@ LABEL org.opencontainers.image.title="magic-wormhole" \
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1
 
+# tmux and screen let a transfer outlive the terminal that started it, and trickle caps
+# the bandwidth a transfer may use; the README covers how each is reached past the entrypoint.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tmux screen trickle \
+ && rm -rf /var/lib/apt/lists/*
+
+# The symlink keeps wormhole reachable from the login shell tmux opens, since /etc/profile
+# replaces PATH with one that does not include the venv.
 RUN --mount=from=builder,source=/wheels,target=/wheels \
     python -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-compile --no-index --find-links=/wheels \
         "magic-wormhole==${WORMHOLE_VERSION}" \
- && find /opt/venv -name '__pycache__' -type d -prune -exec rm -rf {} +
+ && find /opt/venv -name '__pycache__' -type d -prune -exec rm -rf {} + \
+ && ln -s /opt/venv/bin/wormhole /usr/local/bin/wormhole
 
 # HOME is world-writable so the image still works when run under an arbitrary --user UID.
-RUN useradd --uid 1000 --create-home --home-dir /home/wormhole --shell /usr/sbin/nologin wormhole \
+RUN useradd --uid 1000 --create-home --home-dir /home/wormhole --shell /bin/bash wormhole \
  && chmod 0777 /home/wormhole \
  && install -d -o 1000 -g 1000 /data
 
+# tmux and screen open $SHELL, which an arbitrary --user UID has no passwd entry to supply.
 ENV PATH="/opt/venv/bin:${PATH}" \
     HOME=/home/wormhole \
+    SHELL=/bin/bash \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 

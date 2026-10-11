@@ -14,6 +14,27 @@ tag is recorded in this repository rather than inferred from a version string.
 ghcr.io/nuvious/magic-wormhole:latest
 ```
 
+## Included Tools
+
+The image carries a few tools besides the `wormhole` client, all installed from
+the Debian package index at build time.
+
+- `wormhole`, the magic-wormhole CLI and the image's entrypoint.
+- `screen`, a terminal multiplexer for sessions that outlive your connection.
+- `tmux`, a second terminal multiplexer, for those who prefer it.
+- `trickle`, a userspace bandwidth shaper for capping a transfer's rate.
+
+The entrypoint stays `wormhole`, so reach any of the others by overriding it
+with `--entrypoint`, for example `--entrypoint tmux`. For a session that
+survives a dropped terminal, run the multiplexer detached as the container's
+main process and attach to it with `docker exec`:
+
+```bash
+$> docker run -d --name wh -v "$(pwd):/data" --entrypoint tmux \
+    ghcr.io/nuvious/magic-wormhole:latest new-session -s main
+$> docker exec -it wh tmux attach -t main # Detach with Ctrl-b d; the container keeps running.
+```
+
 ## Sending a File
 
 The entrypoint is `wormhole` itself, so everything after the image name is
@@ -50,6 +71,24 @@ without a TTY the code entry and the `ok? (y/N)` confirmation have nowhere to
 go. `send` also prints the code as an ASCII QR block ahead of the text above,
 which is fine on a terminal and unhelpful in a log; `--no-qr`, or
 `WORMHOLE_QR=0` in the environment, turns it off.
+
+### Throttling a Transfer
+
+`trickle` caps the bandwidth of whatever it launches by intercepting its
+socket calls, and rates are given in KB/s. The `-s` flag runs it standalone,
+which is the only mode that makes sense in a container since there is no
+`trickled` daemon to coordinate with. This limits a `send` to 100 KB/s upload:
+
+```bash
+$> docker run --rm -it --user "$(id -u):$(id -g)" -v "$(pwd):/data" \
+    --entrypoint trickle ghcr.io/nuvious/magic-wormhole:latest \
+    -s -u 100 wormhole send report.txt
+```
+
+Use `-d` for a download cap on the `receive` side. **NOTE:** the limit applies
+to the process that trickle launched, so it only shapes the side of the
+transfer you run it on, and the other machine is free to go as fast as the link
+allows.
 
 ## Wrapper Script
 
